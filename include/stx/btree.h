@@ -82,6 +82,10 @@
 /// STX - Some Template Extensions namespace
 namespace stx {
 
+uint8_t getFingerprint(const char* s) {
+    return std::hash<std::string>()(s);
+}
+
 /** Generates default traits for a B+ tree used as a set. It estimates leaf and
  * inner node sizes by assuming a cache line size of 256 bytes. */
 template <typename _Key>
@@ -333,6 +337,8 @@ private:
 
         /// Double linked list pointers to traverse the leaves
         leaf_node * nextleaf;
+
+        uint8_t  fingerprint[leafslotmax];
 
         /// Keys of children or data pointers
         key_type  slotkey[leafslotmax];
@@ -1673,6 +1679,55 @@ private:
         }
     }
 
+    inline int find_lower(const leaf_node* n, const key_type& key) const
+    {
+        uint8_t fp = getFingerprint(key);
+        if (0 && sizeof(n->slotkey) > traits::binsearch_threshold)
+        {
+            if (n->slotuse == 0) return 0;
+
+            int lo = 0, hi = n->slotuse;
+
+            //Not using fingerprints yet!!!
+            while (lo < hi)
+            {
+                int mid = (lo + hi) >> 1;
+
+                if (key_lessequal(key, n->slotkey[mid])) {
+                    hi = mid;     // key <= mid
+                }
+                else {
+                    lo = mid + 1; // key > mid
+                }
+            }
+
+            BTREE_PRINT("btree::find_lower: on " << n << " key " << key << " -> " << lo << " / " << hi);
+
+            // verify result using simple linear search
+            if (selfverify)
+            {
+                int i = 0;
+                while (i < n->slotuse && key_less(n->slotkey[i], key)) ++i;
+
+                BTREE_PRINT("btree::find_lower: testfind: " << i);
+                BTREE_ASSERT(i == lo);
+            }
+
+            return lo;
+        }
+        else // for nodes <= binsearch_threshold do linear search.
+        {
+            int lo = 0;
+            do {
+                while (lo < n->slotuse && (n->fingerprint[lo] < fp)) {
+                    ++lo;
+                };
+            } while(lo < n->slotuse && !key_equal(key, n->slotkey[lo]));
+
+            return lo;
+        }
+    }
+
     /// Searches for the first key in the node n greater than key. Uses binary
     /// search with an optional linear self-verification. This is a template
     /// function, because the slotkey array is located at different places in
@@ -2303,6 +2358,7 @@ private:
                                leaf->slotdata + leaf->slotuse + 1);
 
             leaf->slotkey[slot] = key;
+            leaf->fingerprint[slot] = getFingerprint(key);
             if (!used_as_set) leaf->slotdata[slot] = value;
             leaf->slotuse++;
 
@@ -2343,6 +2399,8 @@ private:
 
         std::copy(leaf->slotkey + mid, leaf->slotkey + leaf->slotuse,
                   newleaf->slotkey);
+        std::copy(leaf->fingerprint + mid, leaf->fingerprint + leaf->slotuse,
+                  newleaf->fingerprint);
         data_copy(leaf->slotdata + mid, leaf->slotdata + leaf->slotuse,
                   newleaf->slotdata);
 
@@ -2693,6 +2751,8 @@ private:
 
             std::copy(leaf->slotkey + slot + 1, leaf->slotkey + leaf->slotuse,
                       leaf->slotkey + slot);
+            std::copy(leaf->fingerprint + slot + 1, leaf->fingerprint + leaf->slotuse,
+                      leaf->fingerprint + slot);
             data_copy(leaf->slotdata + slot + 1, leaf->slotdata + leaf->slotuse,
                       leaf->slotdata + slot);
 
@@ -2989,6 +3049,8 @@ private:
 
             std::copy(leaf->slotkey + slot + 1, leaf->slotkey + leaf->slotuse,
                       leaf->slotkey + slot);
+            std::copy(leaf->fingerprint + slot + 1, leaf->fingerprint + leaf->slotuse,
+                      leaf->fingerprint + slot);
             data_copy(leaf->slotdata + slot + 1, leaf->slotdata + leaf->slotuse,
                       leaf->slotdata + slot);
 
@@ -3269,6 +3331,8 @@ private:
 
         std::copy(right->slotkey, right->slotkey + right->slotuse,
                   left->slotkey + left->slotuse);
+        std::copy(right->fingerprint, right->fingerprint + right->slotuse,
+                  left->fingerprint + left->slotuse);
         data_copy(right->slotdata, right->slotdata + right->slotuse,
                   left->slotdata + left->slotuse);
 
@@ -3353,6 +3417,8 @@ private:
 
         std::copy(right->slotkey, right->slotkey + shiftnum,
                   left->slotkey + left->slotuse);
+        std::copy(right->fingerprint, right->fingerprint + shiftnum,
+                  left->fingerprint + left->slotuse);
         data_copy(right->slotdata, right->slotdata + shiftnum,
                   left->slotdata + left->slotuse);
 
@@ -3362,6 +3428,8 @@ private:
 
         std::copy(right->slotkey + shiftnum, right->slotkey + right->slotuse,
                   right->slotkey);
+        std::copy(right->fingerprint + shiftnum, right->fingerprint + right->slotuse,
+                  right->fingerprint);
         data_copy(right->slotdata + shiftnum, right->slotdata + right->slotuse,
                   right->slotdata);
 
@@ -3473,6 +3541,8 @@ private:
 
         std::copy_backward(right->slotkey, right->slotkey + right->slotuse,
                            right->slotkey + right->slotuse + shiftnum);
+        std::copy_backward(right->fingerprint, right->fingerprint + right->slotuse,
+                           right->fingerprint + right->slotuse + shiftnum);
         data_copy_backward(right->slotdata, right->slotdata + right->slotuse,
                            right->slotdata + right->slotuse + shiftnum);
 
@@ -3481,6 +3551,8 @@ private:
         // copy the last items from the left node to the first slot in the right node.
         std::copy(left->slotkey + left->slotuse - shiftnum, left->slotkey + left->slotuse,
                   right->slotkey);
+        std::copy(left->fingerprint + left->slotuse - shiftnum, left->fingerprint + left->slotuse,
+                  right->fingerprint);
         data_copy(left->slotdata + left->slotuse - shiftnum, left->slotdata + left->slotuse,
                   right->slotdata);
 
