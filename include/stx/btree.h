@@ -82,10 +82,6 @@
 /// STX - Some Template Extensions namespace
 namespace stx {
 
-uint8_t getFingerprint(const char* s) {
-    return std::hash<std::string>()(s);
-}
-
 /** Generates default traits for a B+ tree used as a set. It estimates leaf and
  * inner node sizes by assuming a cache line size of 256 bytes. */
 template <typename _Key>
@@ -289,6 +285,9 @@ private:
         /// Define an related allocator for the inner_node structs.
         typedef typename _Alloc::template rebind<inner_node>::other alloc_type;
 
+        /// One byte fingerprint of keys
+        uint8_t  fingerprint[innerslotmax];
+
         /// Keys of children or data pointers
         key_type slotkey[innerslotmax];
 
@@ -338,6 +337,7 @@ private:
         /// Double linked list pointers to traverse the leaves
         leaf_node * nextleaf;
 
+        /// One byte fingerprint of keys
         uint8_t  fingerprint[leafslotmax];
 
         /// Keys of children or data pointers
@@ -1630,6 +1630,10 @@ public:
     }
 
 private:
+    static uint8_t getFingerprint(const key_type& key) {
+        return (uint8_t)(key >> 24);
+    }
+
     // *** B+ Tree Node Binary Search Functions
 
     /// Searches for the first key in the node n greater or equal to key. Uses
@@ -1639,12 +1643,14 @@ private:
     template <typename node_type>
     inline int find_lower(const node_type* n, const key_type& key) const
     {
+        uint8_t fp = getFingerprint(key);
         if (0 && sizeof(n->slotkey) > traits::binsearch_threshold)
         {
             if (n->slotuse == 0) return 0;
 
             int lo = 0, hi = n->slotuse;
 
+            //Not using fingerprints yet!!!
             while (lo < hi)
             {
                 int mid = (lo + hi) >> 1;
@@ -1674,7 +1680,15 @@ private:
         else // for nodes <= binsearch_threshold do linear search.
         {
             int lo = 0;
-            while (lo < n->slotuse && key_less(n->slotkey[lo], key)) ++lo;
+
+            // We check fingerprints first:
+            while (lo < n->slotuse && (n->fingerprint[lo] < fp)) ++lo;
+
+            // Here, either the fingerprint compares to equal or greater.
+            // If equal, we have to compare keys to find appropriate place, since different keys might have same fingerprint.
+            // If greater, we have found the place already.
+            while(lo < n->slotuse && n->fingerprint[lo] == fp && key_less(n->slotkey[lo], key)) ++lo;
+
             return lo;
         }
     }
@@ -2099,6 +2113,7 @@ private:
             leaf_node* newleaf = allocate_leaf();
 
             newleaf->slotuse = leaf->slotuse;
+            std::copy(leaf->fingerprint, leaf->fingerprint + leaf->slotuse, newleaf->fingerprint);
             std::copy(leaf->slotkey, leaf->slotkey + leaf->slotuse, newleaf->slotkey);
             data_copy(leaf->slotdata, leaf->slotdata + leaf->slotuse, newleaf->slotdata);
 
@@ -2122,6 +2137,7 @@ private:
             inner_node* newinner = allocate_inner(inner->level);
 
             newinner->slotuse = inner->slotuse;
+            std::copy(inner->fingerprint, inner->fingerprint + inner->slotuse, newinner->fingerprint);
             std::copy(inner->slotkey, inner->slotkey + inner->slotuse, newinner->slotkey);
 
             for (unsigned short slot = 0; slot <= inner->slotuse; ++slot)
@@ -2209,6 +2225,7 @@ private:
         if (newchild)
         {
             inner_node* newroot = allocate_inner(m_root->level + 1);
+            newroot->fingerprint[0] = getFingerprint(newkey);
             newroot->slotkey[0] = newkey;
 
             newroot->childid[0] = m_root;
@@ -2291,6 +2308,7 @@ private:
                         inner_node* splitinner = static_cast<inner_node*>(*splitnode);
 
                         // move the split key and it's datum into the left node
+                        inner->fingerprint[inner->slotuse] = getFingerprint(*splitkey);
                         inner->slotkey[inner->slotuse] = *splitkey;
                         inner->childid[inner->slotuse + 1] = splitinner->childid[0];
                         inner->slotuse++;
@@ -2315,11 +2333,14 @@ private:
                 // move items and put pointer to child node into correct slot
                 BTREE_ASSERT(slot >= 0 && slot <= inner->slotuse);
 
+                std::copy_backward(inner->fingerprint + slot, inner->fingerprint + inner->slotuse,
+                                   inner->fingerprint + inner->slotuse + 1);
                 std::copy_backward(inner->slotkey + slot, inner->slotkey + inner->slotuse,
                                    inner->slotkey + inner->slotuse + 1);
                 std::copy_backward(inner->childid + slot, inner->childid + inner->slotuse + 1,
                                    inner->childid + inner->slotuse + 2);
 
+                inner->fingerprint[slot] = getFingerprint(newkey);
                 inner->slotkey[slot] = newkey;
                 inner->childid[slot + 1] = newchild;
                 inner->slotuse++;
@@ -2352,13 +2373,15 @@ private:
             // move items and put data item into correct data slot
             BTREE_ASSERT(slot >= 0 && slot <= leaf->slotuse);
 
+            std::copy_backward(leaf->fingerprint + slot, leaf->fingerprint + leaf->slotuse,
+                               leaf->fingerprint + leaf->slotuse + 1);
             std::copy_backward(leaf->slotkey + slot, leaf->slotkey + leaf->slotuse,
                                leaf->slotkey + leaf->slotuse + 1);
             data_copy_backward(leaf->slotdata + slot, leaf->slotdata + leaf->slotuse,
                                leaf->slotdata + leaf->slotuse + 1);
 
-            leaf->slotkey[slot] = key;
             leaf->fingerprint[slot] = getFingerprint(key);
+            leaf->slotkey[slot] = key;
             if (!used_as_set) leaf->slotdata[slot] = value;
             leaf->slotuse++;
 
@@ -2397,10 +2420,10 @@ private:
             newleaf->nextleaf->prevleaf = newleaf;
         }
 
-        std::copy(leaf->slotkey + mid, leaf->slotkey + leaf->slotuse,
-                  newleaf->slotkey);
         std::copy(leaf->fingerprint + mid, leaf->fingerprint + leaf->slotuse,
                   newleaf->fingerprint);
+        std::copy(leaf->slotkey + mid, leaf->slotkey + leaf->slotuse,
+                  newleaf->slotkey);
         data_copy(leaf->slotdata + mid, leaf->slotdata + leaf->slotuse,
                   newleaf->slotdata);
 
@@ -2437,6 +2460,8 @@ private:
 
         newinner->slotuse = inner->slotuse - (mid + 1);
 
+        std::copy(inner->fingerprint + mid + 1, inner->fingerprint + inner->slotuse,
+                  newinner->fingerprint);
         std::copy(inner->slotkey + mid + 1, inner->slotkey + inner->slotuse,
                   newinner->slotkey);
         std::copy(inner->childid + mid + 1, inner->childid + inner->slotuse + 1,
@@ -2522,6 +2547,7 @@ public:
             // copy last key from each leaf and set child
             for (unsigned short s = 0; s < n->slotuse; ++s)
             {
+                n->fingerprint[s] = leaf->fingerprint[leaf->slotuse - 1];
                 n->slotkey[s] = leaf->slotkey[leaf->slotuse - 1];
                 n->childid[s] = leaf;
                 leaf = leaf->nextleaf;
@@ -2559,6 +2585,7 @@ public:
                 // copy children and maxkeys from nextlevel
                 for (unsigned short s = 0; s < n->slotuse; ++s)
                 {
+                    n->fingerprint[s] = getFingerprint(*nextlevel[inner_index].second);
                     n->slotkey[s] = *nextlevel[inner_index].second;
                     n->childid[s] = nextlevel[inner_index].first;
                     ++inner_index;
@@ -2749,10 +2776,10 @@ private:
 
             BTREE_PRINT("Found key in leaf " << curr << " at slot " << slot);
 
-            std::copy(leaf->slotkey + slot + 1, leaf->slotkey + leaf->slotuse,
-                      leaf->slotkey + slot);
             std::copy(leaf->fingerprint + slot + 1, leaf->fingerprint + leaf->slotuse,
                       leaf->fingerprint + slot);
+            std::copy(leaf->slotkey + slot + 1, leaf->slotkey + leaf->slotuse,
+                      leaf->slotkey + slot);
             data_copy(leaf->slotdata + slot + 1, leaf->slotdata + leaf->slotuse,
                       leaf->slotdata + slot);
 
@@ -2767,6 +2794,7 @@ private:
                 if (parent && parentslot < parent->slotuse)
                 {
                     BTREE_ASSERT(parent->childid[parentslot] == curr);
+                    parent->fingerprint[parentslot] = leaf->fingerprint[leaf->slotuse - 1];
                     parent->slotkey[parentslot] = leaf->slotkey[leaf->slotuse - 1];
                 }
                 else
@@ -2903,6 +2931,7 @@ private:
                     BTREE_PRINT("Fixing lastkeyupdate: key " << result.lastkey << " into parent " << parent << " at parentslot " << parentslot);
 
                     BTREE_ASSERT(parent->childid[parentslot] == curr);
+                    parent->fingerprint[parentslot] = getFingerprint(result.lastkey);
                     parent->slotkey[parentslot] = result.lastkey;
                 }
                 else
@@ -2923,6 +2952,8 @@ private:
 
                 free_node(inner->childid[slot]);
 
+                std::copy(inner->fingerprint + slot, inner->fingerprint + inner->slotuse,
+                          inner->fingerprint + slot - 1);
                 std::copy(inner->slotkey + slot, inner->slotkey + inner->slotuse,
                           inner->slotkey + slot - 1);
                 std::copy(inner->childid + slot + 1, inner->childid + inner->slotuse + 1,
@@ -2935,6 +2966,7 @@ private:
                     // fix split key for children leaves
                     slot--;
                     leaf_node* child = static_cast<leaf_node*>(inner->childid[slot]);
+                    inner->fingerprint[slot] = child->fingerprint[child->slotuse - 1];
                     inner->slotkey[slot] = child->slotkey[child->slotuse - 1];
                 }
             }
@@ -3047,10 +3079,10 @@ private:
 
             BTREE_PRINT("Found iterator in leaf " << curr << " at slot " << slot);
 
-            std::copy(leaf->slotkey + slot + 1, leaf->slotkey + leaf->slotuse,
-                      leaf->slotkey + slot);
             std::copy(leaf->fingerprint + slot + 1, leaf->fingerprint + leaf->slotuse,
                       leaf->fingerprint + slot);
+            std::copy(leaf->slotkey + slot + 1, leaf->slotkey + leaf->slotuse,
+                      leaf->slotkey + slot);
             data_copy(leaf->slotdata + slot + 1, leaf->slotdata + leaf->slotuse,
                       leaf->slotdata + slot);
 
@@ -3065,6 +3097,7 @@ private:
                 if (parent && parentslot < parent->slotuse)
                 {
                     BTREE_ASSERT(parent->childid[parentslot] == curr);
+                    parent->fingerprint[parentslot] = leaf->fingerprint[leaf->slotuse - 1];
                     parent->slotkey[parentslot] = leaf->slotkey[leaf->slotuse - 1];
                 }
                 else
@@ -3216,6 +3249,7 @@ private:
                     BTREE_PRINT("Fixing lastkeyupdate: key " << result.lastkey << " into parent " << parent << " at parentslot " << parentslot);
 
                     BTREE_ASSERT(parent->childid[parentslot] == curr);
+                    parent->fingerprint[parentslot] = getFingerprint(result.lastkey);
                     parent->slotkey[parentslot] = result.lastkey;
                 }
                 else
@@ -3236,6 +3270,8 @@ private:
 
                 free_node(inner->childid[slot]);
 
+                std::copy(inner->fingerprint + slot, inner->fingerprint + inner->slotuse,
+                          inner->fingerprint + slot - 1);
                 std::copy(inner->slotkey + slot, inner->slotkey + inner->slotuse,
                           inner->slotkey + slot - 1);
                 std::copy(inner->childid + slot + 1, inner->childid + inner->slotuse + 1,
@@ -3248,6 +3284,7 @@ private:
                     // fix split key for children leaves
                     slot--;
                     leaf_node* child = static_cast<leaf_node*>(inner->childid[slot]);
+                    inner->fingerprint[slot] = child->fingerprint[child->slotuse - 1];
                     inner->slotkey[slot] = child->slotkey[child->slotuse - 1];
                 }
             }
@@ -3329,10 +3366,10 @@ private:
 
         BTREE_ASSERT(left->slotuse + right->slotuse < leafslotmax);
 
-        std::copy(right->slotkey, right->slotkey + right->slotuse,
-                  left->slotkey + left->slotuse);
         std::copy(right->fingerprint, right->fingerprint + right->slotuse,
                   left->fingerprint + left->slotuse);
+        std::copy(right->slotkey, right->slotkey + right->slotuse,
+                  left->slotkey + left->slotuse);
         data_copy(right->slotdata, right->slotdata + right->slotuse,
                   left->slotdata + left->slotuse);
 
@@ -3378,10 +3415,13 @@ private:
         }
 
         // retrieve the decision key from parent
+        left->fingerprint[left->slotuse] = parent->fingerprint[parentslot];
         left->slotkey[left->slotuse] = parent->slotkey[parentslot];
         left->slotuse++;
 
         // copy over keys and children from right
+        std::copy(right->fingerprint, right->fingerprint + right->slotuse,
+                  left->fingerprint + left->slotuse);
         std::copy(right->slotkey, right->slotkey + right->slotuse,
                   left->slotkey + left->slotuse);
         std::copy(right->childid, right->childid + right->slotuse + 1,
@@ -3415,21 +3455,20 @@ private:
 
         // copy the first items from the right node to the last slot in the left node.
 
-        std::copy(right->slotkey, right->slotkey + shiftnum,
-                  left->slotkey + left->slotuse);
         std::copy(right->fingerprint, right->fingerprint + shiftnum,
                   left->fingerprint + left->slotuse);
+        std::copy(right->slotkey, right->slotkey + shiftnum,
+                  left->slotkey + left->slotuse);
         data_copy(right->slotdata, right->slotdata + shiftnum,
                   left->slotdata + left->slotuse);
 
         left->slotuse += shiftnum;
 
         // shift all slots in the right node to the left
-
-        std::copy(right->slotkey + shiftnum, right->slotkey + right->slotuse,
-                  right->slotkey);
         std::copy(right->fingerprint + shiftnum, right->fingerprint + right->slotuse,
                   right->fingerprint);
+        std::copy(right->slotkey + shiftnum, right->slotkey + right->slotuse,
+                  right->slotkey);
         data_copy(right->slotdata + shiftnum, right->slotdata + right->slotuse,
                   right->slotdata);
 
@@ -3437,6 +3476,7 @@ private:
 
         // fixup parent
         if (parentslot < parent->slotuse) {
+            parent->fingerprint[parentslot] = left->fingerprint[left->slotuse - 1];
             parent->slotkey[parentslot] = left->slotkey[left->slotuse - 1];
             return result_t(btree_ok);
         }
@@ -3478,11 +3518,14 @@ private:
         }
 
         // copy the parent's decision slotkey and childid to the first new key on the left
+        left->fingerprint[left->slotuse] = parent->fingerprint[parentslot];
         left->slotkey[left->slotuse] = parent->slotkey[parentslot];
         left->slotuse++;
 
         // copy the other items from the right node to the last slots in the left node.
 
+        std::copy(right->fingerprint, right->fingerprint + shiftnum - 1,
+                  left->fingerprint + left->slotuse);
         std::copy(right->slotkey, right->slotkey + shiftnum - 1,
                   left->slotkey + left->slotuse);
         std::copy(right->childid, right->childid + shiftnum,
@@ -3491,10 +3534,13 @@ private:
         left->slotuse += shiftnum - 1;
 
         // fixup parent
+        parent->fingerprint[parentslot] = right->fingerprint[shiftnum - 1];
         parent->slotkey[parentslot] = right->slotkey[shiftnum - 1];
 
         // shift all slots in the right node
 
+        std::copy(right->fingerprint + shiftnum, right->fingerprint + right->slotuse,
+                  right->fingerprint);
         std::copy(right->slotkey + shiftnum, right->slotkey + right->slotuse,
                   right->slotkey);
         std::copy(right->childid + shiftnum, right->childid + right->slotuse + 1,
@@ -3549,15 +3595,16 @@ private:
         right->slotuse += shiftnum;
 
         // copy the last items from the left node to the first slot in the right node.
-        std::copy(left->slotkey + left->slotuse - shiftnum, left->slotkey + left->slotuse,
-                  right->slotkey);
         std::copy(left->fingerprint + left->slotuse - shiftnum, left->fingerprint + left->slotuse,
                   right->fingerprint);
+        std::copy(left->slotkey + left->slotuse - shiftnum, left->slotkey + left->slotuse,
+                  right->slotkey);
         data_copy(left->slotdata + left->slotuse - shiftnum, left->slotdata + left->slotuse,
                   right->slotdata);
 
         left->slotuse -= shiftnum;
 
+        parent->fingerprint[parentslot] = left->fingerprint[left->slotuse - 1];
         parent->slotkey[parentslot] = left->slotkey[left->slotuse - 1];
     }
 
@@ -3602,15 +3649,19 @@ private:
         right->slotuse += shiftnum;
 
         // copy the parent's decision slotkey and childid to the last new key on the right
+        right->fingerprint[shiftnum - 1] = parent->fingerprint[parentslot];
         right->slotkey[shiftnum - 1] = parent->slotkey[parentslot];
 
         // copy the remaining last items from the left node to the first slot in the right node.
+        std::copy(left->fingerprint + left->slotuse - shiftnum + 1, left->fingerprint + left->slotuse,
+            right->fingerprint);
         std::copy(left->slotkey + left->slotuse - shiftnum + 1, left->slotkey + left->slotuse,
                   right->slotkey);
         std::copy(left->childid + left->slotuse - shiftnum + 1, left->childid + left->slotuse + 1,
                   right->childid);
 
         // copy the first to-be-removed key from the left node to the parent's decision slot
+        parent->fingerprint[parentslot] = left->fingerprint[left->slotuse - shiftnum];
         parent->slotkey[parentslot] = left->slotkey[left->slotuse - shiftnum];
 
         left->slotuse -= shiftnum;
