@@ -1693,55 +1693,6 @@ private:
         }
     }
 
-    inline int find_lower(const leaf_node* n, const key_type& key) const
-    {
-        uint8_t fp = getFingerprint(key);
-        if (0 && sizeof(n->slotkey) > traits::binsearch_threshold)
-        {
-            if (n->slotuse == 0) return 0;
-
-            int lo = 0, hi = n->slotuse;
-
-            //Not using fingerprints yet!!!
-            while (lo < hi)
-            {
-                int mid = (lo + hi) >> 1;
-
-                if (key_lessequal(key, n->slotkey[mid])) {
-                    hi = mid;     // key <= mid
-                }
-                else {
-                    lo = mid + 1; // key > mid
-                }
-            }
-
-            BTREE_PRINT("btree::find_lower: on " << n << " key " << key << " -> " << lo << " / " << hi);
-
-            // verify result using simple linear search
-            if (selfverify)
-            {
-                int i = 0;
-                while (i < n->slotuse && key_less(n->slotkey[i], key)) ++i;
-
-                BTREE_PRINT("btree::find_lower: testfind: " << i);
-                BTREE_ASSERT(i == lo);
-            }
-
-            return lo;
-        }
-        else // for nodes <= binsearch_threshold do linear search.
-        {
-            int lo = 0;
-            do {
-                while (lo < n->slotuse && (n->fingerprint[lo] < fp)) {
-                    ++lo;
-                };
-            } while(lo < n->slotuse && !key_equal(key, n->slotkey[lo]));
-
-            return lo;
-        }
-    }
-
     /// Searches for the first key in the node n greater than key. Uses binary
     /// search with an optional linear self-verification. This is a template
     /// function, because the slotkey array is located at different places in
