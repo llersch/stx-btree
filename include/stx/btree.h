@@ -79,6 +79,10 @@
 #define BTREE_FRIENDS           friend class btree_friend;
 #endif
 
+#ifndef NODE_SIZE
+#define NODE_SIZE 256
+#endif
+
 /// STX - Some Template Extensions namespace
 namespace stx {
 
@@ -100,11 +104,13 @@ public:
 
     /// Number of slots in each leaf of the tree. Estimated so that each node
     /// has a size of about 256 bytes.
-    static const int leafslots = BTREE_MAX(8, 256 / (sizeof(_Key)));
+    // 256 - id(4) - level(2) - slotuse(2) - prevleaf(8) - nextleaf(8) - slotdata(1)
+    static const int leafslots = BTREE_MAX(8, (NODE_SIZE-4-2-2-8-8-1) / (1 + sizeof(_Key)));
 
     /// Number of slots in each inner node of the tree. Estimated so that each node
     /// has a size of about 256 bytes.
-    static const int innerslots = BTREE_MAX(8, 256 / (sizeof(_Key) + sizeof(void*)));
+    // 256 - id(4) - level(2) - slotuse(2) - last_pointer(8)
+    static const int innerslots = BTREE_MAX(8, (NODE_SIZE-4-2-2-8) / (1 + sizeof(_Key) + sizeof(void*)));
 
     /// As of stx-btree-0.9, the code does linear search in find_lower() and
     /// find_upper() instead of binary_search, unless the node size is larger
@@ -131,11 +137,12 @@ public:
 
     /// Number of slots in each leaf of the tree. Estimated so that each node
     /// has a size of about 256 bytes.
-    static const int leafslots = BTREE_MAX(8, 256 / (sizeof(_Key) + sizeof(_Data)));
+    static const int leafslots = BTREE_MAX(8, (NODE_SIZE-4-2-2-8-8) / (1 + sizeof(_Key) + sizeof(_Data)));
 
     /// Number of slots in each inner node of the tree. Estimated so that each node
     /// has a size of about 256 bytes.
-    static const int innerslots = BTREE_MAX(8, 256 / (sizeof(_Key) + sizeof(void*)));
+    // 256 - id(4) - level(2) - slotuse(2) - last_pointer(8)
+    static const int innerslots = BTREE_MAX(8, (NODE_SIZE-4-2-2-8) / (1 + sizeof(_Key) + sizeof(void*)));
 
     /// As of stx-btree-0.9, the code does linear search in find_lower() and
     /// find_upper() instead of binary_search, unless the node size is larger
@@ -259,6 +266,8 @@ private:
     /// by inner_node or leaf_node.
     struct node
     {
+        unsigned int id;
+
         /// Level in the b-tree, if level == 0 -> leaf node
         unsigned short level;
 
@@ -321,7 +330,7 @@ private:
         {
             return (node::slotuse < mininnerslots);
         }
-    };
+    } __attribute__((aligned(64)));
 
     /// Extended structure of a leaf node in memory. Contains pairs of keys and
     /// data items. Key and data slots are kept in separate arrays, because the
@@ -392,7 +401,7 @@ private:
             BTREE_ASSERT(slot < node::slotuse);
             slotkey[slot] = key;
         }
-    };
+    } __attribute__((aligned(64)));
 
 private:
     // *** Template Magic to Convert a pair or key/data types to a value_type
@@ -1631,7 +1640,7 @@ public:
 
 private:
     static uint8_t getFingerprint(const key_type& key) {
-        return (uint8_t)(key >> 24);
+        return (uint8_t)(key >> ((sizeof(key_type)*8UL)-8UL));
     }
 
     // *** B+ Tree Node Binary Search Functions
@@ -1644,24 +1653,22 @@ private:
     inline int find_lower(const node_type* n, const key_type& key) const
     {
         uint8_t fp = getFingerprint(key);
-        if (0 && sizeof(n->slotkey) > traits::binsearch_threshold)
+        if (sizeof(n->slotkey) > traits::binsearch_threshold)
         {
             if (n->slotuse == 0) return 0;
 
             int lo = 0, hi = n->slotuse;
 
-            //Not using fingerprints yet!!!
-            while (lo < hi)
-            {
+            // Fingerprint search
+            while (lo < hi) {
                 int mid = (lo + hi) >> 1;
-
-                if (key_lessequal(key, n->slotkey[mid])) {
-                    hi = mid;     // key <= mid
-                }
-                else {
-                    lo = mid + 1; // key > mid
-                }
+                if(fp <= n->fingerprint[mid])
+                    hi = mid;
+                else
+                    lo = mid + 1;
             }
+
+            while(lo < n->slotuse && key_less(n->slotkey[lo], key) ) ++lo;
 
             BTREE_PRINT("btree::find_lower: on " << n << " key " << key << " -> " << lo << " / " << hi);
 
